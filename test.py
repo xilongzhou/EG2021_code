@@ -10,6 +10,7 @@ import util.util as util
 from util.visualizer import Visualizer
 from util import html
 import torch
+import ntpath
 
 if __name__ == '__main__':
 
@@ -46,17 +47,10 @@ if __name__ == '__main__':
     print('Gamma Correction: ',Gamma_Correciton)
 
     # test
-    if not opt.engine and not opt.onnx:
-        model = create_model(opt)
-        if opt.data_type == 16:
-            model.half()
-        elif opt.data_type == 8:
-            model.type(torch.uint8)
-                
-        if opt.verbose:
-            print(model)
-    else:
-        from run_engine import run_trt_engine, run_onnx
+    model = create_model(opt)
+    # model.eval()
+    print(model)
+
 
     if opt.log_loss:
         log_path = os.path.join(opt.results_dir, opt.name, 'Totallog.txt')
@@ -66,6 +60,13 @@ if __name__ == '__main__':
         VGG_total=0
         L1_total=0
 
+    if opt.txt:
+      txtpath_index=os.path.join(web_dir,'index_{}'.format(opt.savename))
+      if not os.path.exists(txtpath_index):
+          os.makedirs(txtpath_index) 
+      txtfile_index=open(os.path.join(txtpath_index,'files.txt'),'w')
+
+    allight=torch.empty(0,3).cuda()
     # model.eval()
     for i, data in enumerate(mydata):
 
@@ -98,9 +99,15 @@ if __name__ == '__main__':
                
 
             if opt.mode =='Syn':
+
+                #[0,1] -> [-1,1]
+                # normal_image = generated.data[0,0:3,:,:].detach()*2-1
+                #[-1,1] 
+                Normal_vec = normalize_vec(generated.data[0,0:3,:,:].detach().permute(1,2,0))
+
                 if opt.MyTest=='ALL_1D' or opt.MyTest=='ALL_4D':
                     visuals = OrderedDict([('input_label', util.tensor2label(inputimage[0], opt.label_nc)),
-                                           ('Normal Fake', util.tensor2im(generated.data[0,0:3,:,:], gamma=False)),
+                                           ('Normal Fake', util.tensor2im(Normal_vec.permute(2,0,1), gamma=False)),
                                            ('Normal Real', util.tensor2im(data['image'][0,0:3,:,:], gamma=False)),
                                            ('Diff Fake', util.tensor2im(generated.data[0,3:6,:,:], gamma=True)),
                                            ('Diff Real', util.tensor2im(data['image'][0,3:6,:,:], gamma=True)),
@@ -110,7 +117,7 @@ if __name__ == '__main__':
                                            ('Spec Real', util.tensor2im(data['image'][0,9:12,:,:], gamma=True))])
                 elif opt.MyTest=='ALL_5D_Render':
                     visuals = OrderedDict([('input_label', util.tensor2label(inputimage[0], opt.label_nc)),
-                                           ('Normal Fake', util.tensor2im(generated.data[0,0:3,:,:], gamma=False)),
+                                           ('Normal Fake', util.tensor2im(Normal_vec.permute(2,0,1), gamma=False)),
                                            ('Normal Real', util.tensor2im(data['image'][0,0:3,:,:], gamma=False)),
                                            ('Diff Fake', util.tensor2im(generated.data[0,3:6,:,:], gamma=True)),
                                            ('Diff Real', util.tensor2im(data['image'][0,3:6,:,:], gamma=True)),
@@ -128,20 +135,30 @@ if __name__ == '__main__':
                                            ('synthesized_image', util.tensor2im(generated.data[0], gamma=Gamma_Correciton))])
             elif opt.mode =='Real':
               
-              normal_image = generated.data[0,0:3,:,:].detach()*2-1
-              Normal_vec = (normalize_vec(normal_image)+1)*0.5
+              # normal_image = generated.data[0,0:3,:,:].detach()*2-1
+              # Normal_vec = (normalize_vec(normal_image)+1)*0.5
 
               if opt.MyTest=='ALL_5D_Render':
+
+                  #[0,1] -> [-1,1]
+                  normal_image = generated.data[0,0:3,:,:].detach()*2-1
+                  #[-1,1] -> [0,1]
+                  Normal_vec = (normalize_vec(normal_image.permute(1,2,0))+1)*0.5
+
                   visuals = OrderedDict([('input_label', util.tensor2im(inputimage[0], gamma=False)),
-                                         ('Normal Fake', util.tensor2im(Normal_vec, gamma=False, normalize=False)),
+                                         ('Normal Fake', util.tensor2im(Normal_vec.permute(2,0,1), gamma=False, normalize=False)),
                                          ('Diff Fake', util.tensor2im(generated.data[0,3:6,:,:], gamma=True, normalize=False)),
                                          ('Rough Fake', util.tensor2im(generated.data[0,8:9,:,:].repeat(3,1,1), gamma=False, normalize=False)),
                                          ('Spec Fake', util.tensor2im(generated.data[0,9:12,:,:], gamma=True, normalize=False)),
                                          ('Render Fake', util.tensor2im(rendered[0,:,:,:], gamma=True,normalize=False))
                                          ])            
               else:
+
+                  #[-1,1]
+                  Normal_vec = normalize_vec(generated.data[0,0:3,:,:].detach().permute(1,2,0))
+
                   visuals = OrderedDict([('input_label', util.tensor2im(inputimage[0], gamma=False)),
-                                         ('Normal Fake', util.tensor2im(generated.data[0,0:3,:,:], gamma=False)),
+                                         ('Normal Fake', util.tensor2im(Normal_vec.permute(2,0,1), gamma=False)),
                                          ('Diff Fake', util.tensor2im(generated.data[0,3:6,:,:], gamma=True)),
                                          ('Rough Fake', util.tensor2im(generated.data[0,8:9,:,:].repeat(3,1,1), gamma=False)),
                                          ('Spec Fake', util.tensor2im(generated.data[0,9:12,:,:], gamma=True))
@@ -152,15 +169,39 @@ if __name__ == '__main__':
             print('process image... %s' % img_path)
             visualizer.save_images(webpage, visuals, img_path)
 
+            allight=torch.cat([allight,fakelight],dim=0)
 
+            if opt.txt:
+                short_path = ntpath.basename(img_path[0])
+                name = os.path.splitext(short_path)[0]
+                txtpath_li=os.path.join(web_dir,'light_{}'.format(opt.savename))
+                if not os.path.exists(txtpath_li):
+                    os.makedirs(txtpath_li)                
+
+                # print(fakelight)
+                # print(fakelight.shape)
+                txtfile_index.write('{}\n'.format(name[:4]))
+
+                txtfile_li=open(os.path.join(txtpath_li,'{}.txt'.format(name[:4])),'w')
+                txtfile_li.write('predefined N: {}\n'.format(1))
+                txtfile_li.write('{:.6f},{:.6f},{:.6f}\t'.format(fakelight[0,0].cpu().numpy(),fakelight[0,1].cpu().numpy(),fakelight[0,2].cpu().numpy()))
+                txtfile_li.write('{:.6f},{:.6f},{:.6f}\n'.format(0.0,0.0,2.14))
+                txtfile_li.close()
 
         if opt.log_loss:
             VGG_total+=loss['G_VGG']
             L1_total+=loss['G_L1']
             TestLog_Each.write('Number {:d}: VGG total {:.3f}, L1 Total {:.3f} \n'.format(i,loss['G_VGG'],loss['G_L1']))
 
+    if opt.txt:
+        txtfile_index.close()
 
     webpage.save()
+
+    # print(allight)
+    # npy_path='F:/LoganZhou/Research/OtherPaper/Pix2Pix/Paper/EG2021/comparison/Realimages'
+    # np.save(os.path.join(npy_path , 'light2.npy'),allight.cpu())
+
 
     if opt.log_loss:
         TestLog_Each.close()                    
