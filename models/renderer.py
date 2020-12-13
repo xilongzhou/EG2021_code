@@ -732,3 +732,315 @@ def Batchrender_NumberPointLight_FixedCamera(diff_image, spec_image, normal_imag
 
 	return FinalColor
 
+
+# this is for environment lighting
+# input: featuremap:[B,W,H,C]; Envmap:[W,H,C]
+def EnvPointLight(diff_image, spec_image, normal_image, roughness_image, LightPosition, Position_map, mydevice,Number):
+	
+	CameraPosition=torch.tensor([0.,0.,1.],device=mydevice)
+
+	if diff_image.dim() !=4 or spec_image.dim() !=4 or normal_image.dim() !=4 or roughness_image.dim() !=4:
+		print('dimention error, your input dimention is: ', diff_image.dim())
+		return 
+
+	vertical_norm=torch.tensor([0.,0.,1.],device=mydevice)
+
+	[batch,width,height,channel] = diff_image.shape # the channel is default as 3 here
+	Position_map=Position_map.repeat(Number,1,1,1)
+
+	############################ Light view and H Vector #####################################
+	## light vector [N,W,H,C]
+	L_vec=torch.zeros((Number,width,height,channel),device=mydevice)
+	for i in range(Number):
+		L_vec[i,:,:,:]=LightPosition[i,:]-Position_map[i,:,:,:]
+	L_vec_norm = normalize_vec(L_vec)
+	# print(L_vec_norm)
+
+	## view vector [N,W,H,C]
+	V_vec=torch.zeros((Number,width,height,channel),device=mydevice)
+	for i in range(Number):
+		V_vec[i,:,:,:]=CameraPosition-Position_map[i,:,:,:]
+	V_vec_norm = normalize_vec(V_vec)
+
+	## Half vector of view and light direction [N,W,H,C]
+	H_vec_norm = normalize_vec((L_vec_norm + V_vec_norm)/2)
+
+	## [N,W,H,C] -> [B,N,W,H,C]
+	L_vec_norm=L_vec_norm.repeat(batch,1,1,1,1)
+	V_vec_norm=V_vec_norm.repeat(batch,1,1,1,1)
+	H_vec_norm=H_vec_norm.repeat(batch,1,1,1,1)
+	vertical_norm=vertical_norm.repeat(batch,Number,width,height,1)
+
+	# print('temp shape: ', vertical_norm.shape)
+
+	####################### compute the normal map based on normal_image ################
+	### attention !!! remember to *2 -1 first then normalize 
+	# [0, 1] => [-1, 1]
+	normal = normal_image*2-1
+	# [B,W,H,C] -> [B,N,W,H,C]
+	Normal_vec = normalize_vec(normal).repeat(Number,1,1,1,1).permute(1,0,2,3,4)
+	# print(L_vec_norm.shape)
+
+	## sum() is slower than manually computation
+	# [B,N,W,H,C]
+	NdotL = (Normal_vec*L_vec_norm)#.sum(3).reshape((batch,width,height,1))
+	NdotH = (Normal_vec*H_vec_norm)#.sum(3).reshape((batch,width,height,1))
+	VdotH = (V_vec_norm*H_vec_norm)#.sum(3).reshape((batch,width,height,1))
+	VdotN = (V_vec_norm*Normal_vec)#.sum(3).reshape((batch,width,height,1))
+	L_dot_verticalnorm=L_vec_norm*vertical_norm
+	
+	## manually computation faster
+	# [B,N,W,H,C] -> [B,N,W,H,1]
+	NdotL=(NdotL[:,:,:,:,0:1]+NdotL[:,:,:,:,1:2]+NdotL[:,:,:,:,2:3])#.reshape((batch,Total_Number,width,height,1))
+	NdotH=(NdotH[:,:,:,:,0:1]+NdotH[:,:,:,:,1:2]+NdotH[:,:,:,:,2:3])#.reshape((batch,Total_Number,width,height,1))
+	VdotH=(VdotH[:,:,:,:,0:1]+VdotH[:,:,:,:,1:2]+VdotH[:,:,:,:,2:3])#.reshape((batch,width,Total_Number,height,1))
+	VdotN=(VdotN[:,:,:,:,0:1]+VdotN[:,:,:,:,1:2]+VdotN[:,:,:,:,2:3])#.reshape((batch,width,Total_Number,height,1))
+	L_dot_verticalnorm=(L_dot_verticalnorm[:,:,:,:,0:1]+L_dot_verticalnorm[:,:,:,:,1:2]+L_dot_verticalnorm[:,:,:,:,2:3])#.reshape((batch,width,Total_Number,height,1))
+
+	rough = roughness_image[:,:,:,0:1].repeat(Number,1,1,1,1).permute(1,0,2,3,4)
+	s = spec_image.repeat(Number,1,1,1,1).permute(1,0,2,3,4)
+	diff = diff_image.repeat(Number,1,1,1,1).permute(1,0,2,3,4)
+
+	# [B,N,W,H,C]
+	Color_PointLight=CookTorrance(diff,s,rough,NdotH,NdotL,VdotN,VdotH,L_dot_verticalnorm)
+	
+	# [B,W,H,C]
+	Color_EnvLight=diff*0.0
+
+	# [B,W,H,C]
+	FinalColor=Color_PointLight+Color_EnvLight
+
+	return FinalColor
+
+
+
+############################################# Mask ###################################################################
+
+class MyMask():
+	def __init__(self,mask,zero_number,one_number,Other):
+		self.mask_image=mask #[b,w,h]
+		self.zeros=zero_number
+		self.ones=one_number
+		self.others=Other
+		self.masked_number=self.zeros+self.others
+		self.unmasked_number=self.ones+self.others
+		# self.other=Other
+
+## input:[B,W,H,C], output:[B,W,H]
+## compute mask on the average of 3 channels, fixed threshold
+## soft mask
+def CreateMask(FinalColor, lowthreshold,upthreshold, mydevice):
+
+	[b,w,h,c]=FinalColor.shape
+
+	r=FinalColor[...,0]
+	g=FinalColor[...,1]
+	b=FinalColor[...,2]
+
+	# Mask = torch.where(GrayColor<threshold, torch.tensor([1.0]).to('cuda'), 5.0-5.0*GrayColor)
+	K_equ=1/(lowthreshold-upthreshold)
+	B_equ=upthreshold/(lowthreshold-upthreshold)
+
+	aver=(r+g+b)/3
+
+	Mask = torch.where(aver<=lowthreshold, torch.tensor([1.0]).to(mydevice), torch.where( aver<=upthreshold, K_equ*aver-B_equ,torch.tensor([0.0],device=mydevice)))
+
+	Ones=torch.sum((Mask==1),(1,2))
+	Zeros=torch.sum((Mask==0),(1,2))
+	Other=w*h-Ones-Zeros
+
+	FinalMask=MyMask(Mask,Zeros,Ones,Other)
+
+
+	#[B,W,H]
+	return FinalMask
+
+## input:[B,W,H,C], output:[B,W,H]
+## compute mask on 3 channels seperately, fixed threshold
+## soft mask
+def CreateMask2(InputSpec, lowthreshold, upthreshold , mydevice):
+
+	[b,w,h,c]=InputSpec.shape
+
+	r=InputSpec[...,0]
+	g=InputSpec[...,1]
+	b=InputSpec[...,2]
+
+	K_equ=1/(lowthreshold-upthreshold)
+	B_equ=upthreshold/(lowthreshold-upthreshold)
+
+	Mask_r = torch.where(r<=lowthreshold, torch.tensor([1.0]).to(mydevice), torch.where( r<=upthreshold, K_equ*r-B_equ,torch.tensor([0.0],device=mydevice)))
+	Mask_g = torch.where(g<=lowthreshold, torch.tensor([1.0]).to(mydevice), torch.where( g<=upthreshold, K_equ*g-B_equ,torch.tensor([0.0],device=mydevice)))
+	Mask_b = torch.where(b<=lowthreshold, torch.tensor([1.0]).to(mydevice), torch.where( b<=upthreshold, K_equ*b-B_equ,torch.tensor([0.0],device=mydevice)))
+
+	# print('Mask shape: ',Mask.shape)
+	Mask=torch.max(torch.max(Mask_r, Mask_g), Mask_b)
+
+	Ones=torch.sum((Mask==1),(1,2))
+	Zeros=torch.sum((Mask==0),(1,2))
+	Other=w*h-Ones-Zeros
+
+	# print('Ones: ', Ones)
+	# print('Zeros: ', Zeros)
+	# print('Other: ', Other)
+
+	FinalMask=MyMask(Mask,Zeros,Ones,Other)
+
+	#[B,W,H]
+	return FinalMask
+
+
+## input:[B,W,H,C], output:[B,W,H]
+## compute mask on the average of 3 channels, fixed threshold
+## sharp mask
+def CreateMask3(FinalColor, threshold, inverse, mydevice):
+
+	[b,w,h,c]=FinalColor.shape
+
+	r=FinalColor[...,0]
+	g=FinalColor[...,1]
+	b=FinalColor[...,2]
+
+	# Mask = torch.where(GrayColor<threshold, torch.tensor([1.0]).to('cuda'), 5.0-5.0*GrayColor)
+	K=1.0/(1-threshold)
+
+
+	Mask=(r+g+b)/3
+	Mask = torch.where(Mask<threshold, torch.tensor([1.0]).to(mydevice), torch.tensor([0.0]).to(mydevice))
+	# Mask = torch.where(Mask<threshold, torch.tensor([1.0]).to(mydevice), K-K*Mask)
+
+	if inverse==1:
+		Mask=1.0-Mask
+
+	Ones=torch.sum((Mask==1),(1,2))
+	Zeros=torch.sum((Mask==0),(1,2))
+	Other=w*h-Ones-Zeros
+
+	FinalMask=MyMask(Mask,Zeros,Ones,Other)
+
+	#[B,W,H]
+	return FinalMask
+
+
+## input:[B,W,H,C], output:[B,W,H]
+## compute mask on the average of 3 channels, threshold based on average color
+## soft mask
+def CreateMask4(FinalColor, threshold_AC, threshold_FC, mydevice):
+
+	[b,w,h,c]=FinalColor.shape
+
+	# MeanColor=torch.mean(FinalColor,dim=[1,2,3])
+	# MeanColor=FinalColor.view(b,-1).mean(1)
+	MeanColor=FinalColor.mean(1).mean(1)
+	print('MeanColor shape: ', MeanColor.shape)
+
+	# plt.figure(2)
+	# imshow(MeanColor.unsqueeze(1).unsqueeze(1).repeat(1,256,256,1).cpu())
+	# plt.show()
+
+	# Mask = torch.where(GrayColor<threshold, torch.tensor([1.0]).to('cuda'), 5.0-5.0*GrayColor)
+	Kr=1.0/(1-threshold_AC*MeanColor[:,0].unsqueeze(1).unsqueeze(1))
+	Kg=1.0/(1-threshold_AC*MeanColor[:,1].unsqueeze(1).unsqueeze(1))
+	Kb=1.0/(1-threshold_AC*MeanColor[:,2].unsqueeze(1).unsqueeze(1))
+
+	r=FinalColor[...,0]
+	g=FinalColor[...,1]
+	b=FinalColor[...,2]
+
+	Mask_r = torch.where(r>threshold_AC*MeanColor[:,0].unsqueeze(1).unsqueeze(1), Kr-Kr*r, torch.tensor([1.0]).to(mydevice))
+	Mask_g = torch.where(g>threshold_AC*MeanColor[:,1].unsqueeze(1).unsqueeze(1), Kg-Kg*g, torch.tensor([1.0]).to(mydevice))
+	Mask_b = torch.where(b>threshold_AC*MeanColor[:,2].unsqueeze(1).unsqueeze(1), Kb-Kb*b, torch.tensor([1.0]).to(mydevice))
+	# print('Mask shape: ',Mask.shape)
+	Mask=torch.max(torch.max(Mask_r, Mask_g), Mask_b)
+
+
+	Mask_comple=torch.mean(FinalColor,dim=3)
+	# print('Mask shape: ', Mask.shape)
+	Mask_comple = torch.where(Mask_comple>threshold_FC, torch.tensor([0.0]).to(mydevice), torch.tensor([1.0]).to(mydevice))
+	Mask=torch.min(Mask_comple,Mask)
+
+
+	Ones=torch.sum((Mask==1),(1,2))
+	Zeros=torch.sum((Mask==0),(1,2))
+	Other=w*h-Ones-Zeros
+
+	# print('Ones: ', Ones)
+	# print('Zeros: ', Zeros)
+	# print('Other: ', Other)
+
+	FinalMask=MyMask(Mask,Zeros,Ones,Other)
+
+	# print('1:', Ones)
+	# print('0:', Zeros)
+	# print('2:', Other)
+	# print(FinalMask.)
+	#[B,W,H]
+	return FinalMask
+
+
+########################################## Mask created on the spec relfection ####################################
+## input:[B,W,H,C], output:[B,W,H]
+## compute mask on specular reflection
+## sharp mask
+def CreateMask5(FinalColor, threshold, mydevice):
+
+	[b,w,h,c]=FinalColor.shape
+
+	r=FinalColor[...,0]
+	g=FinalColor[...,1]
+	b=FinalColor[...,2]
+
+	# Mask = torch.where(GrayColor<threshold, torch.tensor([1.0]).to('cuda'), 5.0-5.0*GrayColor)
+	# K=1.0/threshold
+
+	# Mask=(r+g+b)/3
+	Mask_r = torch.where(r>threshold, torch.tensor([1.0]).to(mydevice), torch.tensor([0.0]).to(mydevice)).to(mydevice)
+	Mask_g = torch.where(g>threshold, torch.tensor([1.0]).to(mydevice), torch.tensor([0.0]).to(mydevice)).to(mydevice)
+	Mask_b = torch.where(b>threshold, torch.tensor([1.0]).to(mydevice), torch.tensor([0.0]).to(mydevice)).to(mydevice)
+	# Mask = torch.where(Mask<threshold, torch.tensor([1.0]).to(mydevice), K*Mask+1-K)
+
+	Mask=torch.max(torch.max(Mask_r, Mask_g), Mask_b)
+	# Mask=Mask**3
+
+	Ones=torch.sum((Mask==1),(1,2))
+	Zeros=torch.sum((Mask==0),(1,2))
+	Other=w*h-Ones-Zeros
+
+	FinalMask=MyMask(Mask,Zeros,Ones,Other)
+
+	#[B,W,H]
+	return FinalMask
+
+
+
+## input:[B,W,H,C], output:[B,W,H]
+## compute mask on specular reflection
+## soft mask
+def CreateMask6(FinalColor, threshold, mydevice):
+
+	[b,w,h,c]=FinalColor.shape
+
+	r=FinalColor[...,0]
+	g=FinalColor[...,1]
+	b=FinalColor[...,2]
+
+	# Mask = torch.where(GrayColor<threshold, torch.tensor([1.0]).to('cuda'), 5.0-5.0*GrayColor)
+	K=1.0/threshold
+
+	# Mask=(r+g+b)/3
+	Mask_r = torch.where(r>threshold, torch.tensor([1.0]).to(mydevice), K*r).to(mydevice)
+	Mask_g = torch.where(g>threshold, torch.tensor([1.0]).to(mydevice), K*g).to(mydevice)
+	Mask_b = torch.where(b>threshold, torch.tensor([1.0]).to(mydevice), K*b).to(mydevice)
+	# Mask = torch.where(Mask<threshold, torch.tensor([1.0]).to(mydevice), K*Mask+1-K)
+
+	Mask=torch.max(torch.max(Mask_r, Mask_g), Mask_b)
+	# Mask=Mask**3
+
+	Ones=torch.sum((Mask==1),(1,2))
+	Zeros=torch.sum((Mask==0),(1,2))
+	Other=w*h-Ones-Zeros
+
+	FinalMask=MyMask(Mask,Zeros,Ones,Other)
+
+	#[B,W,H]
+	return FinalMask

@@ -618,6 +618,25 @@ class Pix2PixHDModel(BaseModel):
 
 			loss_G_VGG = self.criterionVGG(fake_vg, real_vg) * self.opt.lambda_feat
 
+		# VGG feature loss
+		# loss_G_VGG = 0
+		# if not self.opt.no_vgg_loss:
+		# 	## only compute vgg loss for the diffuse map
+		# 	if self.MyTest=='Diff':
+		# 		fake_vg=fake_syn
+		# 		real_vg=real_syn
+		# 	elif self.MyTest=='ALL_1D_Render' or self.MyTest=='ALL_5D_Render':
+		# 		fake_vg=Render_Fake
+		# 		real_vg=Render_Real
+		# 		# print(Render_Fake)
+		# 		# renderimage = {'Fake':fake_diff,'Real':real_diff}
+		# 	else:
+		# 		fake_vg=fake_syn[:,3:6,:,:]
+		# 		real_vg=real_syn[:,3:6,:,:]
+
+		# 	loss_G_VGG = self.criterionVGG(fake_vg, real_vg) * self.opt.lambda_feat
+
+
 		# L1 loss
 		loss_G_L1 = 0
 		if not self.opt.no_l1_loss:
