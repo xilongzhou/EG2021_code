@@ -157,7 +157,7 @@ def Create_NumberPointLightPosition(Near_Number,r_max, mydevice):
 
 	m=tdist.Normal(torch.tensor([1.0]),torch.tensor([0.75]))
 	Distance=m.sample((Near_Number,2)).to(mydevice)
-	Light_po=Origin+rand_light*2.14#torch.exp(Distance[:,0])
+	Light_po=Origin+rand_light*torch.exp(Distance[:,0])
 
 	return Light_po
 
