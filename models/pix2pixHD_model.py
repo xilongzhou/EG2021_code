@@ -618,7 +618,7 @@ class Pix2PixHDModel(BaseModel):
 
 			loss_G_VGG = self.criterionVGG(fake_vg, real_vg) * self.opt.lambda_feat
 
-		# VGG feature loss
+		# # VGG feature loss
 		# loss_G_VGG = 0
 		# if not self.opt.no_vgg_loss:
 		# 	## only compute vgg loss for the diffuse map
